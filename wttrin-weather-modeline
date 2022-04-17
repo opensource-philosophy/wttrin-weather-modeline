@@ -1,0 +1,110 @@
+;;; wttr.in configuration ;;;
+
+(use-package wttrin
+  :ensure t
+  :init  (setq wttrin-default-cities '("Köln" "Berlin"))
+  :config
+(defun wttrin-fetch-raw-string (query) "Get the weather information based on your QUERY." (let ((url-user-agent "curl"))
+    (add-to-list 'url-request-extra-headers wttrin-default-accept-language)
+    (with-current-buffer
+        (url-retrieve-synchronously
+         (concat "http://wttr.in/" query "?A")
+         (lambda (status) (switch-to-buffer (current-buffer))))
+      (decode-coding-string (buffer-string) 'utf-8))))
+      
+(defun bjm/wttrin ()
+    "Open `wttrin' without prompting, using first city in `wttrin-default-cities'"
+    (interactive)
+    ;; save window arrangement to register
+    (window-configuration-to-register :pre-wttrin)
+    (delete-other-windows)
+    ;; save frame setup
+    (current-frame-configuration)
+    (set-frame-width (selected-frame) 130)
+    (set-frame-height (selected-frame) 48)
+    ;; call wttrin
+    (wttrin-query (car wttrin-default-cities)))
+(setq wttrin-default-accept-language '("Accept-Language" . "de-DE")))
+
+;;; weather-modeline for wttr.in ;;;
+
+(require 'url)
+(require 'wttrin)
+
+(defvar weather-mode-line-city (car wttrin-default-cities)
+  "Default city for mode line weather.")
+
+(defvar weather-mode-line-format " %l: %C %t %h (%p) %w %m"
+  "Format string for <https://wttr.in>.
+Available options are described at <https://github.com/chubin/wttr.in>.")
+
+(defvar weather-mode-line-update-time 600
+  "Time (in seconds) to update the mode line weather.")
+
+(defvar weather-mode-line-timer nil)
+(defvar weather-mode-line-string "")
+;; This is needed for mode-line.  See (info "(elisp) Mode Line Data")
+(put 'weather-mode-line-string 'risky-local-variable t)
+
+(defvar weather-url-buffer nil)
+
+(defun weather-make-query (&optional city format)
+  (let ((city (or city weather-mode-line-city ""))
+        (format (or format weather-mode-line-format)))
+    (if format
+        (concat city "?format=\"" format "\"")
+      city)))
+
+(defun weather-url-callback (status &rest _)
+  (when (and status (boundp 'url-http-data))
+    (when (and weather-mode
+               (not (plist-get status :error)))
+      (goto-char (point-min))
+      (when (re-search-forward "^\"\\(.*\\)\"$" nil t)
+        (setq weather-mode-line-string
+              (decode-coding-string (match-string-no-properties 1)
+                                    'utf-8)))
+      (force-mode-line-update))
+    (kill-buffer)))
+
+(defun weather-stop-update ()
+  (when (and weather-url-buffer
+             (buffer-live-p weather-url-buffer))
+    (let ((proc (get-buffer-process weather-url-buffer)))
+      (when proc (delete-process proc))
+      (kill-buffer weather-url-buffer))))
+
+(defun weather-update-mode-line-string-async ()
+  (weather-stop-update)
+  (let ((url-request-extra-headers (cons wttrin-default-accept-language
+                                         '(("User-Agent" . "curl")))))
+    (setq weather-url-buffer
+          (url-retrieve (url-expand-file-name
+                         (url-encode-url (weather-make-query))
+                         "http://wttr.in")
+                        #'weather-url-callback))
+    (message nil)))
+
+(define-minor-mode weather-mode
+  "Toggle displaying weather in the mode line."
+  :global t
+  (when weather-mode-line-timer
+    (cancel-timer weather-mode-line-timer))
+  (setq weather-mode-line-string "")
+  (if weather-mode
+      ;; Turn on.
+      (progn
+        (if global-mode-string
+            (add-to-list 'global-mode-string
+                         'weather-mode-line-string
+                         'append)
+          (setq global-mode-string '("" weather-mode-line-string)))
+        (setq weather-mode-line-timer
+              (run-with-timer 0 weather-mode-line-update-time
+                              #'weather-update-mode-line-string-async)))
+    ;; Turn off.
+    (weather-stop-update)
+    (setq global-mode-string
+          (remove 'weather-mode-line-string
+                  global-mode-string)))
+  (force-mode-line-update))
